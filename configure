@@ -14,10 +14,14 @@ version="$(<VERSION tr -d '\r')"
 
 # A series of #define lines to write in src/cimg_config.h
 defines=""
-# A space-separated list of libraries to link with -l
+# A space-separated list of linker flags to link with required libraries
 libs=""
+# A space-separated list of compiler flags to configure include paths
+includes=""
 # The program used for pandoc
 pandoc=""
+# What flag to use to compile using C++11 features.
+cxxstd=""
 
 
 #################################### MAIN ####################################
@@ -29,23 +33,34 @@ main() {
   require_system_header term.h
   require_system_header sysexits.h
 
+  # Figure out how to compile C++ 11 code
+  if use_cxxflag -std=c++11 ; then
+    cxxstd="-std=c++11"
+  elif use_cxxflag -std=c++0x ; then
+    cxxstd="-std=c++0x"
+  else
+    error "unable to find a C++11 compiler"
+  fi
+
   # Link with -lcurses (required)
-  if link_lib_against_test_program tigetnum curses ; then
+  if link_lib_against_test_program tigetnum ncurses ; then
+    libs="${libs} -lncurses"
+  elif link_lib_against_test_program tigetnum curses ; then
     libs="${libs} -lcurses"
   else
     error "ncurses is required for compilation"
   fi
 
   # Link with -lpng (optional)
-  if link_lib_against_test_program png_create_info_struct png ; then
+  if link_lib_against_test_program_using_pkgconfig png_create_info_struct png ; then
     defines="${defines}#define cimg_use_png 1${NEWLINE}"
-    libs="${libs} -lpng"
+    extend_libs_and_includes_using_pkgconfig png
   fi
 
   # Link with -ljpg (optional)
-  if link_lib_against_test_program jpeg_set_defaults jpeg ; then
+  if link_lib_against_test_program_using_pkgconfig jpeg_set_defaults jpeg ; then
     defines="${defines}#define cimg_use_jpeg 1${NEWLINE}"
-    libs="${libs} -ljpeg"
+    extend_libs_and_includes_using_pkgconfig jpeg
   fi
 
   # Check if pandoc is installed (optional)
@@ -62,6 +77,8 @@ main() {
 PACKAGE_VERSION = ${version}
 PANDOC = ${pandoc}
 LIBS = ${libs}
+INCLUDE_FLAGS = ${includes}
+CXXSTD = ${cxxstd}
 EOF
 
   generate_file src/config.h <<EOF
@@ -91,8 +108,9 @@ EX_UNAVAILABLE=69
 
 NEWLINE="$(printf '\n ')" && NEWLINE="${NEWLINE% }"
 
-# Use the default C compiler
+# Use the default C and C++ compilers
 CC="${CC:-gcc}"
+CXX="${CXX:-c++}"
 TMPDIR="${TMPDIR:-/tmp}"
 
 # Colors
@@ -107,6 +125,18 @@ require_system_header() {
   if ! compile_with_header "$header" ; then
     error "failed to find required header: $header"
   fi
+}
+
+use_cxxflag() {
+  flag="$1"
+  printf "checking to compile C++ with ${flag}... "
+
+  compile_test_cxx_program "${flag}" <<EOF
+int main(void) {
+  void *p = nullptr;
+  return p != 0;
+}
+EOF
 }
 
 # Create a test program that uses a library function and link against that
@@ -124,6 +154,31 @@ link_lib_against_test_program() {
       return ${funcname}();
     }
 EOF
+}
+
+# Create a test program that uses a library function and link against that
+# library. Returns zero on if the library was linked succesfully, non-zero
+# otherwise.
+link_lib_against_test_program_using_pkgconfig() {
+  funcname=$1
+  lib=$2
+
+  printf 'checking to link with lib%s using pkg-config [using %s()]... ' "$lib" "$funcname"
+  compile_test_program $(pkg-config --cflags --libs lib${lib}) <<EOF
+    char ${funcname}(void);
+
+    int main(void) {
+      return ${funcname}();
+    }
+EOF
+}
+
+# Add the appropriate flags for the given library using pkg-config(1)
+extend_libs_and_includes_using_pkgconfig() {
+  lib=$1
+
+  libs="${libs} $(pkg-config --libs lib${lib})"
+  includes="${includes} $(pkg-config --cflags lib${lib})"
 }
 
 # Check if the program is on the path.
@@ -163,13 +218,28 @@ compile_with_header() {
 EOF
 }
 
-# Compiles a test program given on stdin.
+# Compiles a test C program given on stdin.
 # Any arguments are passed to the compiler.
 compile_test_program() {
   filename="${TMPDIR}/conftest.$$.c"
 
   cat > "${filename}"
-  if ${CC} -o /dev/null "${filename}" "$@" ; then
+  if "${CC}" -o /dev/null "${filename}" "$@" ; then
+    echo "yes"
+    return 0
+  else
+    echo "no"
+    return 1
+  fi
+}
+
+# Compiles a test C++ program given on stdin.
+# Any arguments are passed to the compiler.
+compile_test_cxx_program() {
+  filename="${TMPDIR}/conftest.$$.cc"
+
+  cat > "${filename}"
+  if "${COMPILER:=${CC}}" -o /dev/null "${filename}" "$@" ; then
     echo "yes"
     return 0
   else
